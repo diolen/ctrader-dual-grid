@@ -108,6 +108,26 @@ class TestDemoConnection:
         assert len(candles) > 0, "Свечи не пришли"
         logging.info(f"Загружено свечей EURUSD M5: {len(candles)}")
 
+    async def test_get_expected_margin(self, demo_client):
+        """Получение оценки маржи через API для всех пар."""
+        from app.config.settings import config
+        pairs = config.PAIRS if config.PAIRS else ["EURUSD"]
+
+        # Тестируем объём 0.01 lot (100_000 cents)
+        volume_cents = 100_000
+
+        for pair in pairs:
+            info = demo_client.get_pair_info(pair)
+            assert info is not None, f"{pair} не найден"
+            symbol_id = info[0]
+
+            margin = await demo_client.get_expected_margin(symbol_id, volume_cents)
+
+            assert margin is not None, f"Маржа не получена для {pair}"
+            assert isinstance(margin, float), f"Маржа должна быть float для {pair}"
+            assert margin > 0, f"Маржа должна быть положительной для {pair}"
+            logging.info(f"📊 Expected Margin для {pair} 0.01 lot: {margin:.2f}")
+
 
 # ── Тесты исполнения ордеров ─────────────────────────────────────
 

@@ -97,6 +97,8 @@ _PT_SUBSCRIBE_SPOTS_REQ = model_proto.PROTO_OA_SUBSCRIBE_SPOTS_REQ # 2127
 _PT_SUBSCRIBE_SPOTS_RES = model_proto.PROTO_OA_SUBSCRIBE_SPOTS_RES # 2128
 _PT_SPOT_EVENT          = model_proto.PROTO_OA_SPOT_EVENT          # 2131
 _PT_DEAL_LIST_BY_POSITION_RES = model_proto.PROTO_OA_DEAL_LIST_BY_POSITION_ID_RES  # 2180
+_PT_EXPECTED_MARGIN_REQ = model_proto.PROTO_OA_EXPECTED_MARGIN_REQ  # 2139
+_PT_EXPECTED_MARGIN_RES = model_proto.PROTO_OA_EXPECTED_MARGIN_RES  # 2140
 _PT_HEARTBEAT         = 51
 
 # Пакеты без логирования в listen_loop (высокая частота / разовые при старте)
@@ -113,6 +115,7 @@ _SILENT_PACKET_TYPES = frozenset({
     _PT_SUBSCRIBE_SPOTS_RES,
     _PT_SPOT_EVENT,
     _PT_TRENDBARS_RES,
+    _PT_EXPECTED_MARGIN_RES,
 })
 
 _EXECUTION_TYPE_LABELS = {
@@ -161,6 +164,9 @@ class CTraderClient:
 
         # Баланс
         self._trader_future: Optional[asyncio.Future] = None
+
+        # Expected Margin
+        self._expected_margin_future: Optional[asyncio.Future] = None
 
         # Reconcile (позиции + pending ордера)
         self._reconcile_future: Optional[asyncio.Future] = None
@@ -384,6 +390,43 @@ class CTraderClient:
         except asyncio.TimeoutError:
             logging.error("❌ Таймаут при получении баланса")
             return None
+
+    async def get_expected_margin(self, symbol_id: int, volume_cents: int) -> Optional[float]:
+        """
+        Возвращает оценку маржи для символа и объёма в валюте депозита.
+        
+        Args:
+            symbol_id: ID символа
+            volume_cents: объём в центах API (100_000 = 0.01 lot)
+            
+        Returns:
+            Маржа в валюте депозита или None при ошибке
+        """
+        loop = asyncio.get_running_loop()
+
+        # Защита от параллельных вызовов — переиспользуем незавершённый future
+        if self._expected_margin_future and not self._expected_margin_future.done():
+            try:
+                return await asyncio.wait_for(self._expected_margin_future, timeout=10)
+            except asyncio.TimeoutError:
+                logging.error("❌ Таймаут при ожидании expected margin (параллельный вызов)")
+                return None
+
+        self._expected_margin_future = loop.create_future()
+        await self._send(_PT_EXPECTED_MARGIN_REQ, proto.ProtoOAExpectedMarginReq(
+            ctidTraderAccountId=config.ACCOUNT_ID,
+            symbolId=symbol_id,
+            volume=[volume_cents],
+        ))
+
+        try:
+            margin = await asyncio.wait_for(self._expected_margin_future, timeout=10)
+            return margin
+        except asyncio.TimeoutError:
+            logging.error("❌ Таймаут при получении expected margin")
+            return None
+        finally:
+            self._expected_margin_future = None
 
     # ── Размещение ордера ─────────────────────────────────────────
 
@@ -1150,6 +1193,31 @@ class CTraderClient:
                         
                     except Exception as e:
                         logging.error(f"❌ Ошибка обработки TRADER_RES: {e}", exc_info=True)
+
+                elif pt == _PT_EXPECTED_MARGIN_RES:
+                    try:
+                        res = proto.ProtoOAExpectedMarginRes()
+                        res.ParseFromString(msg.payload)
+                        money_digits = int(getattr(res, "moneyDigits", 0) or self._money_digits)
+                        margin_value = 0.0
+                        if res.margin:
+                            # Берём buyMargin из первого элемента (для одного объёма)
+                            margin_data = res.margin[0]
+                            buy_margin = int(getattr(margin_data, "buyMargin", 0) or 0)
+                            sell_margin = int(getattr(margin_data, "sellMargin", 0) or 0)
+                            # Используем buyMargin как значение маржи
+                            margin_value = _money_to_float(buy_margin, money_digits)
+                            logging.debug(
+                                f"📊 Expected Margin: buy={margin_value:.2f}, "
+                                f"sell={_money_to_float(sell_margin, money_digits):.2f}, "
+                                f"moneyDigits={money_digits}"
+                            )
+                        if self._expected_margin_future and not self._expected_margin_future.done():
+                            self._expected_margin_future.set_result(margin_value)
+                    except Exception as e:
+                        logging.error(f"❌ Ошибка обработки EXPECTED_MARGIN_RES: {e}", exc_info=True)
+                        if self._expected_margin_future and not self._expected_margin_future.done():
+                            self._expected_margin_future.set_result(None)
 
                 elif pt == _PT_DEAL_LIST_BY_POSITION_RES:
                     try:
