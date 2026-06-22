@@ -31,6 +31,7 @@ SCREENER_ONLY=true python main.py
 |-------|---------|----------|
 | **Screener** (рекомендуется) | `SCREENER_ONLY=true python main.py` | Multi-setup анализ с логированием, без ордеров |
 | Legacy screener | `SCREENER_ONLY=true USE_MULTI_SCANNER=false python main.py` | Только Breakout v3 + фазы FSM |
+| **Trading Layer** | `STRATEGY_TYPE=DUAL_GRID_V8 python main.py` | Adaptive Dual Grid Portfolio Strategy v8 |
 | Live | `SCREENER_ONLY=false python main.py` | Сигналы + `MANUAL` / `AUTO` |
 | Backtest | `python main.py --backtest` | Прогон v3 по истории M5 с API |
 
@@ -251,9 +252,15 @@ make test                              # unit-тесты (без integration)
 make test-all                          # все тесты
 make test-integration                  # demo API (маркер integration)
 make test-coverage                     # coverage app/core, strategy, scanner
+
+# Trading Layer тесты
+pytest tests/test_trading_layer.py -v
+pytest tests/test_trading_layer.py::TestGridManager -v
+pytest tests/test_trading_layer.py::TestPortfolioManager -v
+pytest tests/test_trading_layer.py::TestTradingEngine -v
 ```
 
-Основные модули: `test_scanner_phase2`, `test_scanner_phase3`, `test_setup_ranker`, `test_screener_runtime`, `test_api_load_helpers`, `test_breakout_retest_v3`, `test_orchestrator`, `test_guard`.
+Основные модули: `test_scanner_phase2`, `test_scanner_phase3`, `test_setup_ranker`, `test_screener_runtime`, `test_api_load_helpers`, `test_breakout_retest_v3`, `test_orchestrator`, `test_guard`, `test_trading_layer` (36 тестов для Trading Layer).
 
 ---
 
@@ -264,16 +271,102 @@ make test-coverage                     # coverage app/core, strategy, scanner
 
 ---
 
+## Trading Layer (Adaptive Dual Grid Portfolio Strategy v8)
+
+Trading Layer реализует адаптивную стратегию двойной сетки поверх существующих Broker Layer и Scanner Layer.
+
+### Основные возможности:
+
+- **Независимые Long/Short сетки** - каждая сетка управляется отдельно с собственным шагом на основе ATR
+- **Динамический шаг сетки** - `grid_step = ATR(14) * ATR_MULTIPLIER` с сглаживанием Уайлдера
+- **Контроль экспозиции** - оценка маржи через `get_expected_margin()` для лимита суммарной позиции
+- **Execution-проверки** - фильтрация по спреду и ATR-spike перед открытием позиций
+- **Режимы деградации**:
+  - **Normal** - обычный режим
+  - **Conservative** - повышенный порог входа, сниженный объём
+  - **Freeze** - новые уровни не открываются
+  - **Exit** - закрытие худшей позиции
+- **Глобальный TP/SL** - портфельный уровень прибыли/убытка
+- **Дисбаланс-контроль** - ограничение перевеса одной стороны
+- **TTL ордеров** - автоматическая отмена неисполненных грид-ордеров
+
+### Конфигурация Trading Layer:
+
+```bash
+# Пороги входа и добавления уровней
+ENTRY_THRESHOLD=0.7
+ADD_LEVEL_THRESHOLD=0.6
+
+# Параметры ATR
+ATR_PERIOD=14
+ATR_MULTIPLIER=1.5
+
+# Лимиты сетки
+MAX_GRID_LEVELS=5
+
+# Управление рисками портфеля
+MAX_PORTFOLIO_DRAWDOWN=-0.10
+PORTFOLIO_TARGET=0.15
+MAX_TOTAL_EXPOSURE=0.50
+
+# Размер позиции
+RISK_PER_TRADE=0.02
+SL_ATR_MULTIPLIER=2.0
+
+# Execution-проверки
+SPREAD_LOOKBACK_BARS=20
+SPREAD_REJECT_MULTIPLIER=2.0
+SPREAD_WARN_MULTIPLIER=1.5
+ATR_BASELINE_LOOKBACK_BARS=50
+ATR_SPIKE_MULTIPLIER=2.0
+EXECUTION_WARN_VOLUME_REDUCTION=0.5
+
+# Контроль дисбаланса
+IMBALANCE_SOFT_THRESHOLD=0.6
+IMBALANCE_HARD_THRESHOLD=0.8
+IMBALANCE_SCORE_PENALTY=0.1
+
+# Режимы деградации
+EXIT_MODE_DRAWDOWN_THRESHOLD=-0.05
+FREEZE_ATR_SPIKE_MULTIPLIER=3.0
+FREEZE_CONSECUTIVE_REJECTIONS=5
+CONSERVATIVE_SCORE_PENALTY=0.15
+CONSERVATIVE_VOLUME_MULTIPLIER=0.7
+CONSECUTIVE_REJECTIONS_FOR_CONSERVATIVE=3
+
+# TTL ордеров
+GRID_ORDER_TTL_BARS=3
+
+# Наблюдаемые инструменты
+WATCHED_INSTRUMENTS=EURUSD:M5
+```
+
+### Архитектура Trading Layer:
+
+```
+app/trading/
+  grid_models.py          # GridPosition, Direction, ExecutionApproval
+  grid_manager.py         # GridManager для Long/Short сеток
+  portfolio_manager.py    # PortfolioManager для рисков и деградации
+  atr_calculator.py       # Расчёт ATR методом Уайлдера
+  trading_engine.py       # TradingEngine - основной оркестратор
+```
+
+Trading Layer интегрируется с существующим `StrategyOrchestrator` для отслеживания ордеров и recovery логики, но использует собственный `SetupScannerEngine` для получения сигналов.
+
+---
+
 ## План разработки
 
-### Предварительная задача: Расширение Broker Layer
-Реализовать метод `get_expected_margin()` в `CTraderClient` для оценки маржи через cTrader Open API (`ProtoOAExpectedMarginReq`/`ProtoOAExpectedMarginRes`). Это необходимо для корректного контроля суммарной экспозиции в Trading Layer.
+### ✅ Предварительная задача: Расширение Broker Layer
+Реализован метод `get_expected_margin()` в `CTraderClient` для оценки маржи через cTrader Open API (`ProtoOAExpectedMarginReq`/`ProtoOAExpectedMarginRes`).
 
-### Основная задача: Trading Layer
-Реализовать Trading Layer (Adaptive Dual Grid Portfolio Strategy v8) поверх существующих Broker Layer и Scanner Layer:
-- Независимые Long/Short сетки с динамическим шагом на основе ATR
-- Контроль суммарной экспозиции через реальную оценку маржи у брокера
-- Execution-проверки (спред/ATR-spike) перед открытием позиций
-- Режимы деградации (Normal/Conservative/Freeze/Exit)
-- Глобальный TP/SL и дисбаланс-контроль
-- Интеграция с существующим `StrategyOrchestrator`
+### ✅ Основная задача: Trading Layer
+Реализован Trading Layer (Adaptive Dual Grid Portfolio Strategy v8) поверх существующих Broker Layer и Scanner Layer:
+- ✅ Независимые Long/Short сетки с динамическим шагом на основе ATR
+- ✅ Контроль суммарной экспозиции через реальную оценку маржи у брокера
+- ✅ Execution-проверки (спред/ATR-spike) перед открытием позиций
+- ✅ Режимы деградации (Normal/Conservative/Freeze/Exit)
+- ✅ Глобальный TP/SL и дисбаланс-контроль
+- ✅ Интеграция с существующим `StrategyOrchestrator`
+- ✅ Комплексные тесты (36 тестов)

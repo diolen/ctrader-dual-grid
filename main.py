@@ -15,6 +15,7 @@ from app.strategy.orchestrator import StrategyOrchestrator
 from app.strategy.backtest import run_backtest_v3
 from app.trading.executor import TradeExecutor
 from app.core.recommender import AnalysisResult
+from app.trading.trading_engine import TradingEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 # Рутинные переходы pending/fill/close — DEBUG; не засоряют консоль при root DEBUG
@@ -409,10 +410,19 @@ async def _run_strategy_tick(
     client: CTraderClient,
     executor: TradeExecutor,
     market_cache: MarketCache,
+    trading_engine: Optional[TradingEngine] = None,
     *,
     reason: str = "",
 ) -> None:
     """Один проход стратегии по текущему буферу свечей."""
+    from app.config.settings import config
+    
+    # Use Trading Engine if DUAL_GRID_V8 strategy
+    if config.STRATEGY_TYPE == "DUAL_GRID_V8" and trading_engine:
+        trading_engine.on_bar_update(state, orchestrator, client, market_cache)
+        return
+    
+    # Original strategy logic
     from app.strategy.base import MarketData
 
     market_data = MarketData(
@@ -441,6 +451,7 @@ async def _poll_pair(
     executor: TradeExecutor,
     market_cache: MarketCache,
     poll_now: int,
+    trading_engine: Optional[TradingEngine] = None,
 ) -> None:
     """Один тик опроса M5 → стратегия → сигнал."""
     pair = state.pair
@@ -494,6 +505,7 @@ async def _poll_pair(
         client,
         executor,
         market_cache,
+        trading_engine,
         reason="новый M5" if bars_added else "live-tick",
     )
 
@@ -523,6 +535,7 @@ async def _poll_all_pairs(
     executor: TradeExecutor,
     market_cache: MarketCache,
     poll_now: int,
+    trading_engine: Optional[TradingEngine] = None,
     *,
     cycle_label: str = "",
 ) -> None:
@@ -541,6 +554,7 @@ async def _poll_all_pairs(
             executor,
             market_cache,
             poll_now,
+            trading_engine,
         )
     _log_pair_fsm(states, orchestrator)
     _maybe_log_api_metrics(client)
@@ -554,6 +568,14 @@ async def _run_bar_coordinator(
     market_cache: MarketCache,
 ) -> None:
     """Единый цикл опроса свечей: одно пробуждение на бар, пары последовательно."""
+    from app.config.settings import config
+    
+    # Initialize TradingEngine if DUAL_GRID_V8 strategy
+    trading_engine: Optional[TradingEngine] = None
+    if config.STRATEGY_TYPE == "DUAL_GRID_V8":
+        trading_engine = TradingEngine()
+        logging.info("🚀 TradingEngine initialized for DUAL_GRID_V8 strategy")
+    
     states: list[_PairRuntime] = []
     for pair in pairs:
         state = await _warmup_pair(client, pair, orchestrator)
@@ -588,6 +610,7 @@ async def _run_bar_coordinator(
         executor,
         market_cache,
         poll_now,
+        trading_engine,
         cycle_label="Опрос после прогрева",
     )
 
@@ -610,6 +633,7 @@ async def _run_bar_coordinator(
             executor,
             market_cache,
             poll_now,
+            trading_engine,
             cycle_label="Опрос M5",
         )
 

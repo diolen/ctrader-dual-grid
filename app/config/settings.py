@@ -270,6 +270,64 @@ class AppConfig:
     BACKTEST_ASSUMED_SPREAD_PIPS: float = float(os.getenv("BACKTEST_ASSUMED_SPREAD_PIPS", "1.0"))
     BACKTEST_QUIET_LOGS: bool = os.getenv("BACKTEST_QUIET_LOGS", "true").lower() == "true"
 
+    # --- Trading Layer (Dual Grid Strategy) ---
+    # Entry and level thresholds
+    ENTRY_THRESHOLD: float = float(os.getenv("ENTRY_THRESHOLD", "0.7"))
+    ADD_LEVEL_THRESHOLD: float = float(os.getenv("ADD_LEVEL_THRESHOLD", "0.6"))
+    
+    # ATR parameters
+    ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
+    ATR_MULTIPLIER: float = float(os.getenv("ATR_MULTIPLIER", "1.5"))
+    
+    # Grid limits
+    MAX_GRID_LEVELS: int = int(os.getenv("MAX_GRID_LEVELS", "5"))
+    
+    # Portfolio risk management
+    MAX_PORTFOLIO_DRAWDOWN: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN", "-0.10"))
+    PORTFOLIO_TARGET: float = float(os.getenv("PORTFOLIO_TARGET", "0.15"))
+    MAX_TOTAL_EXPOSURE: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "0.50"))
+    
+    # Position sizing
+    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
+    SL_ATR_MULTIPLIER: float = float(os.getenv("SL_ATR_MULTIPLIER", "2.0"))
+    
+    # Execution checks - spread
+    SPREAD_LOOKBACK_BARS: int = int(os.getenv("SPREAD_LOOKBACK_BARS", "20"))
+    SPREAD_REJECT_MULTIPLIER: float = float(os.getenv("SPREAD_REJECT_MULTIPLIER", "2.0"))
+    SPREAD_WARN_MULTIPLIER: float = float(os.getenv("SPREAD_WARN_MULTIPLIER", "1.5"))
+    
+    # Execution checks - ATR
+    ATR_BASELINE_LOOKBACK_BARS: int = int(os.getenv("ATR_BASELINE_LOOKBACK_BARS", "50"))
+    ATR_SPIKE_MULTIPLIER: float = float(os.getenv("ATR_SPIKE_MULTIPLIER", "2.0"))
+    EXECUTION_WARN_VOLUME_REDUCTION: float = float(os.getenv("EXECUTION_WARN_VOLUME_REDUCTION", "0.5"))
+    
+    # Imbalance control
+    IMBALANCE_SOFT_THRESHOLD: float = float(os.getenv("IMBALANCE_SOFT_THRESHOLD", "0.6"))
+    IMBALANCE_HARD_THRESHOLD: float = float(os.getenv("IMBALANCE_HARD_THRESHOLD", "0.8"))
+    IMBALANCE_SCORE_PENALTY: float = float(os.getenv("IMBALANCE_SCORE_PENALTY", "0.1"))
+    
+    # Degradation modes
+    EXIT_MODE_DRAWDOWN_THRESHOLD: float = float(os.getenv("EXIT_MODE_DRAWDOWN_THRESHOLD", "-0.05"))
+    FREEZE_ATR_SPIKE_MULTIPLIER: float = float(os.getenv("FREEZE_ATR_SPIKE_MULTIPLIER", "3.0"))
+    FREEZE_CONSECUTIVE_REJECTIONS: int = int(os.getenv("FREEZE_CONSECUTIVE_REJECTIONS", "5"))
+    CONSERVATIVE_SCORE_PENALTY: float = float(os.getenv("CONSERVATIVE_SCORE_PENALTY", "0.15"))
+    CONSERVATIVE_VOLUME_MULTIPLIER: float = float(os.getenv("CONSERVATIVE_VOLUME_MULTIPLIER", "0.7"))
+    CONSECUTIVE_REJECTIONS_FOR_CONSERVATIVE: int = int(os.getenv("CONSECUTIVE_REJECTIONS_FOR_CONSERVATIVE", "3"))
+    
+    # Grid order TTL
+    GRID_ORDER_TTL_BARS: int = int(os.getenv("GRID_ORDER_TTL_BARS", "3"))
+    
+    # Temporary placeholder for MAX_TOTAL_EXPOSURE (will be replaced by get_expected_margin)
+    REFERENCE_LOT_VALUE: float = float(os.getenv("REFERENCE_LOT_VALUE", "100000.0"))
+    
+    # Watched instruments (format: "SYMBOL:TIMEFRAME,SYMBOL:TIMEFRAME")
+    WATCHED_INSTRUMENTS: List[tuple[str, str]] = field(
+        default_factory=lambda: [
+            (pair.strip().split(":")[0], pair.strip().split(":")[1] if ":" in pair else "M5")
+            for pair in os.getenv("WATCHED_INSTRUMENTS", "EURUSD:M5").split(",")
+        ]
+    )
+
     def warmup_bars_for_pair(self, pair: str) -> int:
         """Прогрев M5: lookback + запас для cold_start."""
         cfg = self.get_pair_config(pair)
