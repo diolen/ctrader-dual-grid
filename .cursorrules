@@ -1,0 +1,32 @@
+# cTrader Market Screener — AI Assistant Guidelines
+
+## Project Overview
+Python market screener for cTrader Open API:
+- **Breakout Retest Scalping v3** (M5): анализ фаз рынка, shallow retest logic
+- **SCREENER_ONLY** (default use case): read-only анализ, без исполнения сделок
+- Опционально: live trading + бэктест v3 (`SCREENER_ONLY=false`)
+
+## Architecture
+
+### Core Components
+- **main.py**: SCREENER_ONLY loop + optional live trading / `--backtest`
+- **app/connection/ctrader_client.py**: cTrader Open API (TCP/TLS, protobuf)
+- **app/strategy/breakout_retest_v3.py**: Breakout Retest v3 + `get_analysis_result()`
+- **app/core/recommender.py**: фазы рынка → текстовые рекомендации
+- **app/config/settings.py**: `DEFAULT_PAIRS`, `_BREAKOUT_OVERRIDES`, `PairConfig`
+
+### Screener Data Flow
+1. Candles (M5) → BreakoutRetestV3Strategy.update() → FSM
+2. get_analysis_result() → MarketRecommender
+
+### Live Trading (optional)
+- StrategyOrchestrator + TradeExecutor + MarketCache + TradeGuard
+
+## Running
+- Screener: `SCREENER_ONLY=true python main.py`
+- Live: `python main.py`
+- Backtest: `python main.py --backtest`
+
+## Env
+CTRADER_*, CLIENT_*, ACCESS_TOKEN, ACCOUNT_ID, PAIRS, SCREENER_ONLY
+Per-pair: defaults in `settings.py`, override via `{PAIR}_BREAKOUT_*`
