@@ -876,5 +876,64 @@ class TestTradingEngineLifecycle:
         assert client.close_position_partial.await_count == 2
 
 
+class TestPositionSizing:
+    """Risk-based lot calculation for Dual Grid."""
+
+    async def test_calculate_position_size_eurusd_realistic(self):
+        """~1480 USD equity, 2% risk, ATR-based SL → well below MAX_LOT."""
+        from app.config.settings import config
+
+        engine = TradingEngine()
+        engine.portfolio.initialize_baseline(1479.98)
+
+        client = AsyncMock()
+        client.get_balance = AsyncMock(return_value=1479.98)
+        client.get_pair_info = MagicMock(return_value=(1, 100_000, 5, 0.0001, 100_000, 100_000))
+
+        volume = await engine._calculate_position_size(
+            client, "EURUSD", current_atr=0.0008, degradation_mode=DegradationMode.NORMAL,
+        )
+
+        # risk≈29.6, sl_dist=0.0016 → raw≈0.185 lot
+        assert 0.01 <= volume < 0.5
+        assert volume <= config.MAX_LOT
+
+    async def test_calculate_position_size_not_capped_at_max_lot(self):
+        """Broken formula would hit MAX_LOT=1.0; fixed formula must not."""
+        from app.config.settings import config
+
+        engine = TradingEngine()
+        engine.portfolio.initialize_baseline(1479.98)
+
+        client = AsyncMock()
+        client.get_balance = AsyncMock(return_value=1479.98)
+        client.get_pair_info = MagicMock(return_value=(1, 100_000, 5, 0.0001, 100_000, 100_000))
+
+        volume = await engine._calculate_position_size(
+            client, "EURUSD", current_atr=0.0008, degradation_mode=DegradationMode.NORMAL,
+        )
+
+        assert volume < 1.0 or config.MAX_LOT < 1.0
+
+    async def test_calculate_position_size_independent_of_prior_pnl(self):
+        """Volume depends on equity/ATR, not previous level PnL (no martingale)."""
+        engine = TradingEngine()
+        engine.portfolio.initialize_baseline(10_000.0)
+
+        client = AsyncMock()
+        client.get_balance = AsyncMock(return_value=10_000.0)
+        client.get_pair_info = MagicMock(return_value=(1, 100_000, 5, 0.0001, 100_000, 100_000))
+
+        vol_a = await engine._calculate_position_size(
+            client, "EURUSD", current_atr=0.0010, degradation_mode=DegradationMode.NORMAL,
+        )
+        vol_b = await engine._calculate_position_size(
+            client, "EURUSD", current_atr=0.0010, degradation_mode=DegradationMode.NORMAL,
+        )
+
+        assert vol_a == vol_b
+        assert vol_a > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

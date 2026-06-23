@@ -14,6 +14,7 @@ from app.trading.volume import (
     lot_to_volume_cents,
     volume_cents_to_lot,
     resolve_order_volume,
+    PIP_LOT_UNITS,
 )
 from app.config.settings import config
 from app.scanner.screener_runtime import MultiSetupScreener
@@ -492,14 +493,23 @@ class TradingEngine:
             return 0.0
 
         risk_amount = equity * config.RISK_PER_TRADE
-        raw_volume = risk_amount / (sl_distance_price * pip_value)
+        # pip_value from API is price pip size (e.g. 0.0001); monetary risk uses lot units.
+        raw_volume = risk_amount / (sl_distance_price * PIP_LOT_UNITS)
+        logger.debug(
+            f"TradingEngine: position size {pair} equity={equity:.2f} risk={risk_amount:.2f} "
+            f"sl_dist={sl_distance_price:.5f} raw_lot={raw_volume:.4f}",
+        )
 
         if degradation_mode == DegradationMode.CONSERVATIVE:
             raw_volume *= config.CONSERVATIVE_VOLUME_MULTIPLIER
 
         resolved = resolve_order_volume(raw_volume, min_volume_cents, step_volume_cents)
         volume = resolved.actual_lot
-        volume = min(volume, config.MAX_LOT)
+        if volume > config.MAX_LOT:
+            logger.warning(
+                f"TradingEngine: calculated lot {volume:.2f} > MAX_LOT {config.MAX_LOT}, capping",
+            )
+            volume = config.MAX_LOT
         if volume <= 0:
             return 0.0
         return volume

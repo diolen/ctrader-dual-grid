@@ -1046,7 +1046,7 @@ async def _run_live(config) -> None:
         market_cache=market_cache,
         pair_configs=pair_configs,
     )
-    logging.info(f"🎯 Стратегия: {orchestrator.get_strategy_type()}")
+    logging.info(f"🎯 Стратегия: {config.STRATEGY_TYPE}")
     logging.info(f"⏰ Торговое окно: {config.TRADE_WINDOW_START} - {config.TRADE_WINDOW_END} UTC")
 
     await orchestrator.run_recovery()
