@@ -350,7 +350,7 @@ class AppConfig:
 
         def _pi(key: str) -> int:
             v = _env(key)
-            return int(v) if v is not None else int(_default(key))
+            return int(float(v)) if v is not None else int(_default(key))
 
         def _ps(key: str) -> str:
             v = _env(key)

@@ -2,14 +2,14 @@
 
 import pytest
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, AsyncMock, MagicMock
 
 from app.trading.grid_models import GridPosition, Direction, ExecutionApproval, DegradationMode
 from app.trading.grid_manager import GridManager
 from app.trading.portfolio_manager import PortfolioManager
 from app.trading.atr_calculator import compute_atr, compute_atr_baseline
-from app.trading.trading_engine import TradingEngine, RollingWindow
+from app.trading.trading_engine import TradingEngine, RollingWindow, _broker_direction_to_grid, _is_watched
 
 
 class TestGridModels:
@@ -224,19 +224,18 @@ class TestPortfolioManager:
         long_grid = GridManager(Direction.LONG)
         short_grid = GridManager(Direction.SHORT)
         
-        # Create imbalance: long has 8 lots, short has 2 lots
-        # Total = 10, imbalance = |8-2|/10 = 0.6
+        # Create imbalance: long 9 lots, short 1 lot → imbalance = 0.8 (hard threshold)
         long_grid.add_position(GridPosition(
             direction=Direction.LONG,
             entry_price=1.1000,
-            volume=8.0,
+            volume=9.0,
             stop_loss=1.0900,
             client_order_id="long_1",
         ))
         short_grid.add_position(GridPosition(
             direction=Direction.SHORT,
             entry_price=1.1000,
-            volume=2.0,
+            volume=1.0,
             stop_loss=1.1100,
             client_order_id="short_1",
         ))
@@ -525,60 +524,356 @@ class TestTradingEngine:
         assert df['close'].iloc[0] == 1.1005
         assert df['close'].iloc[1] == 1.1010
     
-    def test_execution_check_cold_start(self):
+    async def test_execution_check_cold_start(self):
         """Test execution check passes on cold start (window not full)."""
         engine = TradingEngine()
-        
-        # Mock client
+
         client = Mock()
-        client.get_spread = Mock(return_value=1.5)
-        
-        approval = engine._execution_check("EURUSD", client, current_atr=0.0010)
-        
-        # Should approve with no reduction on cold start
+        client.get_spread = AsyncMock(return_value=1.5)
+
+        approval = await engine._execution_check("EURUSD", client, current_atr=0.0010)
+
         assert approval.approved is True
         assert approval.volume_multiplier == 1.0
-    
-    def test_execution_check_spread_rejection(self):
+
+    async def test_execution_check_spread_rejection(self):
         """Test execution check rejects on high spread."""
         engine = TradingEngine()
-        
-        # Fill spread history
+
         for _ in range(20):
             engine.spread_history["EURUSD"].add(1.0)
-        
-        # Fill ATR history
+
         for _ in range(50):
             engine.atr_baseline_history["EURUSD"].add(0.0010)
-        
+
         client = Mock()
-        client.get_spread = Mock(return_value=3.0)  # 3x average
-        
-        approval = engine._execution_check("EURUSD", client, current_atr=0.0010)
-        
+        client.get_spread = AsyncMock(return_value=3.0)
+
+        approval = await engine._execution_check("EURUSD", client, current_atr=0.0010)
+
         assert approval.approved is False
-    
-    def test_execution_check_warn_zone(self):
+
+    async def test_execution_check_warn_zone(self):
         """Test execution check reduces volume in warn zone."""
         from app.config.settings import config
-        
+
         engine = TradingEngine()
-        
-        # Fill spread history
+
         for _ in range(20):
             engine.spread_history["EURUSD"].add(1.0)
-        
-        # Fill ATR history
+
         for _ in range(50):
             engine.atr_baseline_history["EURUSD"].add(0.0010)
-        
+
         client = Mock()
-        client.get_spread = Mock(return_value=1.8)  # In warn zone
-        
-        approval = engine._execution_check("EURUSD", client, current_atr=0.0010)
-        
+        client.get_spread = AsyncMock(return_value=1.8)
+
+        approval = await engine._execution_check("EURUSD", client, current_atr=0.0010)
+
         assert approval.approved is True
         assert approval.volume_multiplier == config.EXECUTION_WARN_VOLUME_REDUCTION
+
+
+class TestTradingEngineHelpers:
+    """Helper and integration-style unit tests."""
+
+    def test_broker_direction_mapping(self):
+        assert _broker_direction_to_grid("BUY") == Direction.LONG
+        assert _broker_direction_to_grid("SELL") == Direction.SHORT
+
+    def test_is_watched_pair(self):
+        watched = [("EURUSD", "M5"), ("GBPUSD", "M15")]
+        assert _is_watched("EURUSD", "M5", watched) is True
+        assert _is_watched("EURUSD", "M15", watched) is False
+        assert _is_watched("XAUUSD", "M5", watched) is False
+
+    async def test_on_bar_update_skips_unwatched_pair(self):
+        engine = TradingEngine()
+        client = AsyncMock()
+        orchestrator = AsyncMock()
+        state = Mock(pair="XAUUSD", entry_tf="M5", symbol_id=2, candles=[], entry_minutes=5)
+
+        await engine.on_bar_update(state, orchestrator, client, None)
+
+        client.get_positions.assert_not_called()
+        client.get_spread.assert_not_called()
+
+    async def test_on_bar_update_halted_skips_trading(self):
+        from app.config.settings import config
+        from app.models.candle import Candle
+
+        engine = TradingEngine()
+        engine.portfolio.halted = True
+        engine.spread_history["EURUSD"] = RollingWindow(config.SPREAD_LOOKBACK_BARS)
+        engine.atr_baseline_history["EURUSD"] = RollingWindow(config.ATR_BASELINE_LOOKBACK_BARS)
+
+        candles = [
+            Candle(
+                timestamp=datetime(2024, 1, 1),
+                open=1.1, high=1.11, low=1.09, close=1.105, volume=100,
+            ),
+        ]
+        state = Mock(
+            pair="EURUSD", entry_tf="M5", symbol_id=1,
+            candles=candles, entry_minutes=5,
+        )
+        client = AsyncMock()
+        client.get_spread = AsyncMock(return_value=1.0)
+        client.get_expected_margin = AsyncMock(return_value=500.0)
+        client.get_positions = AsyncMock(return_value=[])
+        client.get_balance = AsyncMock(return_value=10000.0)
+        orchestrator = AsyncMock()
+
+        await engine.on_bar_update(state, orchestrator, client, None)
+
+        client.place_limit_order.assert_not_called()
+
+
+def _eurusd_pair_info():
+    return (1, 100_000, 5, 0.0001, 100_000, 100_000)
+
+
+def _make_resolved_volume(lot: float = 0.01):
+    from app.trading.volume import ResolvedVolume, lot_to_volume_cents
+
+    cents = lot_to_volume_cents(lot)
+    return ResolvedVolume(
+        calculated_lot=lot,
+        calculated_volume_cents=cents,
+        actual_volume_cents=cents,
+        min_volume_cents=100_000,
+        step_volume_cents=100_000,
+        bumped_to_min=False,
+        rounded_to_step=False,
+    )
+
+
+class TestTradingEngineLifecycle:
+    """Reconciliation, TTL, orders, degradation transitions."""
+
+    async def test_reconcile_removes_stale_position(self):
+        engine = TradingEngine()
+        engine.long_grid.add_position(GridPosition(
+            direction=Direction.LONG,
+            entry_price=1.1,
+            volume=0.01,
+            stop_loss=1.09,
+            client_order_id="ord-1",
+            position_id="999",
+        ))
+
+        client = AsyncMock()
+        client.get_positions = AsyncMock(return_value=[])
+        client.get_spread = AsyncMock(return_value=1.0)
+
+        await engine._reconcile_positions(client, "EURUSD")
+
+        assert engine.long_grid.level_count() == 0
+
+    async def test_reconcile_restores_from_pending_metadata(self):
+        engine = TradingEngine()
+        placed_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        engine.pending_order_metadata["pending-1"] = {
+            "level_index": 1,
+            "grid_step_at_open": 0.0015,
+            "signal_score_at_open": 8.0,
+            "order_placed_at": placed_at,
+            "direction": Direction.LONG,
+            "entry_price": 1.1000,
+            "pair": "EURUSD",
+        }
+
+        client = AsyncMock()
+        client.get_positions = AsyncMock(return_value=[{
+            "id": 42,
+            "symbol": "EURUSD",
+            "volume": 100_000,
+            "entry_price": 1.1000,
+            "profit": 0.0,
+            "direction": "BUY",
+        }])
+        client.get_spread = AsyncMock(return_value=0.0002)
+
+        await engine._reconcile_positions(client, "EURUSD")
+
+        assert engine.long_grid.level_count() == 1
+        pos = engine.long_grid.get_last_position()
+        assert pos.position_id == "42"
+        assert pos.level_index == 1
+        assert "pending-1" not in engine.pending_order_metadata
+
+    async def test_ttl_cancels_expired_pending(self):
+        from app.config.settings import config
+        from app.models.candle import Candle
+
+        engine = TradingEngine()
+        old_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        engine.pending_order_metadata["expired-1"] = {
+            "order_placed_at": old_time,
+            "pair": "EURUSD",
+            "direction": Direction.LONG,
+            "entry_price": 1.1,
+            "level_index": 1,
+            "grid_step_at_open": 0.001,
+            "signal_score_at_open": 7.0,
+        }
+        engine.long_grid.add_position(GridPosition(
+            direction=Direction.LONG,
+            entry_price=1.1,
+            volume=0.01,
+            stop_loss=1.09,
+            client_order_id="expired-1",
+        ))
+
+        client = AsyncMock()
+        client.cancel_order_by_client_id = AsyncMock(return_value=True)
+        candles = [Candle(
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            open=1.1, high=1.11, low=1.09, close=1.105, volume=100,
+        )]
+
+        await engine._check_pending_orders_ttl(client, "EURUSD", candles, entry_minutes=5)
+
+        client.cancel_order_by_client_id.assert_awaited_once_with("expired-1", timeout=5)
+        assert "expired-1" not in engine.pending_order_metadata
+        assert engine.long_grid.level_count() == 0
+
+    async def test_place_grid_order_track_failure_does_not_add_position(self):
+        engine = TradingEngine()
+        grid = engine.long_grid
+        client = AsyncMock()
+        client.get_pair_info = MagicMock(return_value=_eurusd_pair_info())
+        client.get_pending_orders = AsyncMock(return_value=[])
+        client.place_limit_order = AsyncMock(return_value=("new-order", _make_resolved_volume()))
+        orchestrator = AsyncMock()
+        orchestrator.track_limit_order = AsyncMock(side_effect=RuntimeError("track failed"))
+
+        ok = await engine._place_grid_order(
+            direction=Direction.LONG,
+            current_price=1.1,
+            current_atr=0.001,
+            volume=0.01,
+            score=8.0,
+            orchestrator=orchestrator,
+            client=client,
+            pair="EURUSD",
+            symbol_id=1,
+            grid_manager=grid,
+        )
+
+        assert ok is False
+        assert grid.level_count() == 0
+        assert "new-order" in engine.pending_order_metadata
+
+    async def test_place_grid_order_success(self):
+        engine = TradingEngine()
+        grid = engine.long_grid
+        client = AsyncMock()
+        client.get_pair_info = MagicMock(return_value=_eurusd_pair_info())
+        client.get_pending_orders = AsyncMock(return_value=[])
+        client.place_limit_order = AsyncMock(return_value=("ok-order", _make_resolved_volume()))
+        orchestrator = AsyncMock()
+
+        ok = await engine._place_grid_order(
+            direction=Direction.LONG,
+            current_price=1.1,
+            current_atr=0.001,
+            volume=0.01,
+            score=8.0,
+            orchestrator=orchestrator,
+            client=client,
+            pair="EURUSD",
+            symbol_id=1,
+            grid_manager=grid,
+        )
+
+        assert ok is True
+        assert grid.level_count() == 1
+        assert grid.get_last_position().client_order_id == "ok-order"
+        orchestrator.track_limit_order.assert_awaited_once()
+
+    async def test_freeze_transition_cancels_pending(self):
+        engine = TradingEngine()
+        engine._last_degradation_mode = DegradationMode.NORMAL
+        engine.pending_order_metadata["pend-1"] = {
+            "pair": "EURUSD",
+            "order_placed_at": datetime.now(timezone.utc),
+            "direction": Direction.LONG,
+            "entry_price": 1.1,
+            "level_index": 1,
+            "grid_step_at_open": 0.001,
+            "signal_score_at_open": 7.0,
+        }
+
+        client = AsyncMock()
+        client.get_pending_orders = AsyncMock(return_value=[
+            {"clientOrderId": "pend-1"},
+        ])
+        client.cancel_order_by_client_id = AsyncMock(return_value=True)
+        orchestrator = AsyncMock()
+        orchestrator.cancel_tracked_limit_order = AsyncMock(return_value=False)
+
+        await engine._handle_degradation_transition(
+            DegradationMode.FREEZE, client, orchestrator, "EURUSD",
+        )
+
+        assert "pend-1" not in engine.pending_order_metadata
+        client.cancel_order_by_client_id.assert_awaited()
+
+    async def test_process_grid_signal_respects_manual_mode(self, monkeypatch):
+        from types import SimpleNamespace
+        from app.config.settings import config as app_config
+        from app.trading import trading_engine as te
+
+        patched = SimpleNamespace(
+            TRADING_MODE="MANUAL",
+            TRADE_WINDOW_START=app_config.TRADE_WINDOW_START,
+            TRADE_WINDOW_END=app_config.TRADE_WINDOW_END,
+            ENTRY_THRESHOLD=app_config.ENTRY_THRESHOLD,
+            ADD_LEVEL_THRESHOLD=app_config.ADD_LEVEL_THRESHOLD,
+            CONSERVATIVE_SCORE_PENALTY=app_config.CONSERVATIVE_SCORE_PENALTY,
+            IMBALANCE_SOFT_THRESHOLD=app_config.IMBALANCE_SOFT_THRESHOLD,
+            IMBALANCE_SCORE_PENALTY=app_config.IMBALANCE_SCORE_PENALTY,
+            MAX_GRID_LEVELS=app_config.MAX_GRID_LEVELS,
+            SL_ATR_MULTIPLIER=app_config.SL_ATR_MULTIPLIER,
+            RISK_PER_TRADE=app_config.RISK_PER_TRADE,
+            CONSERVATIVE_VOLUME_MULTIPLIER=app_config.CONSERVATIVE_VOLUME_MULTIPLIER,
+            MAX_LOT=app_config.MAX_LOT,
+            ATR_MULTIPLIER=app_config.ATR_MULTIPLIER,
+        )
+
+        engine = TradingEngine()
+        monkeypatch.setattr(te, "config", patched)
+        client = AsyncMock()
+        orchestrator = AsyncMock()
+
+        await engine._process_grid_signal(
+            direction=Direction.LONG,
+            score=9.0,
+            current_price=1.1,
+            current_atr=0.001,
+            degradation_mode=DegradationMode.NORMAL,
+            orchestrator=orchestrator,
+            client=client,
+            pair="EURUSD",
+            symbol_id=1,
+        )
+
+        client.place_limit_order.assert_not_called()
+
+    async def test_close_position_retries_once(self):
+        engine = TradingEngine()
+        client = AsyncMock()
+        client.close_position_partial = AsyncMock(return_value=True)
+        client.get_positions = AsyncMock(side_effect=[
+            [{"id": 7, "volume": 50_000, "symbol": "EURUSD"}],
+            [],
+        ])
+
+        ok = await engine._close_position_with_verify(client, "7", 100_000)
+
+        assert ok is True
+        assert client.close_position_partial.await_count == 2
 
 
 if __name__ == "__main__":

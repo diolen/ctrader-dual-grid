@@ -255,12 +255,13 @@ make test-coverage                     # coverage app/core, strategy, scanner
 
 # Trading Layer тесты
 pytest tests/test_trading_layer.py -v
+pytest tests/test_trading_engine_integration.py -v -m integration
 pytest tests/test_trading_layer.py::TestGridManager -v
 pytest tests/test_trading_layer.py::TestPortfolioManager -v
 pytest tests/test_trading_layer.py::TestTradingEngine -v
 ```
 
-Основные модули: `test_scanner_phase2`, `test_scanner_phase3`, `test_setup_ranker`, `test_screener_runtime`, `test_api_load_helpers`, `test_breakout_retest_v3`, `test_orchestrator`, `test_guard`, `test_trading_layer` (36 тестов для Trading Layer).
+Основные модули: `test_scanner_phase2`, `test_scanner_phase3`, `test_setup_ranker`, `test_screener_runtime`, `test_api_load_helpers`, `test_breakout_retest_v3`, `test_orchestrator`, `test_guard`, `test_trading_layer` (48 unit-тестов), `test_trading_engine_integration` (demo smoke).
 
 ---
 

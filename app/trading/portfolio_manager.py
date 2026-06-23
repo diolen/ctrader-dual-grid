@@ -49,6 +49,7 @@ class PortfolioManager:
         short_grid: GridManager,
         equity: float,
         margin_per_lot: float,
+        additional_lots: float = 0.0,
     ) -> bool:
         """
         Check if portfolio can expand with a new position.
@@ -57,28 +58,24 @@ class PortfolioManager:
         # Check if halted
         if self.halted:
             return False
+
+        if margin_per_lot <= 0:
+            logger.warning("PortfolioManager: margin_per_lot not cached, blocking expand")
+            return False
         
         # Calculate total exposure
         long_volume = long_grid.total_exposure_lots()
         short_volume = short_grid.total_exposure_lots()
         total_volume = long_volume + short_volume
+        projected_volume = total_volume + additional_lots
         
         # Check exposure limit using margin
-        if margin_per_lot > 0:
-            max_lots_by_margin = (equity * config.MAX_TOTAL_EXPOSURE) / margin_per_lot
-            if total_volume >= max_lots_by_margin:
-                logger.warning(
-                    f"PortfolioManager: exposure limit hit: {total_volume:.2f} >= {max_lots_by_margin:.2f}"
-                )
-                return False
-        else:
-            # Fallback to reference lot value if margin not available
-            max_lots_by_ref = (equity * config.MAX_TOTAL_EXPOSURE) / config.REFERENCE_LOT_VALUE
-            if total_volume >= max_lots_by_ref:
-                logger.warning(
-                    f"PortfolioManager: exposure limit hit (fallback): {total_volume:.2f} >= {max_lots_by_ref:.2f}"
-                )
-                return False
+        max_lots_by_margin = (equity * config.MAX_TOTAL_EXPOSURE) / margin_per_lot
+        if projected_volume > max_lots_by_margin:
+            logger.warning(
+                f"PortfolioManager: exposure limit hit: {projected_volume:.2f} > {max_lots_by_margin:.2f}"
+            )
+            return False
         
         # Check imbalance hard threshold
         if total_volume > 0:

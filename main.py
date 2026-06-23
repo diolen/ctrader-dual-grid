@@ -419,7 +419,7 @@ async def _run_strategy_tick(
     
     # Use Trading Engine if DUAL_GRID_V8 strategy
     if config.STRATEGY_TYPE == "DUAL_GRID_V8" and trading_engine:
-        trading_engine.on_bar_update(state, orchestrator, client, market_cache)
+        await trading_engine.on_bar_update(state, orchestrator, client, market_cache)
         return
     
     # Original strategy logic
@@ -1108,6 +1108,113 @@ async def main():
     from app.config.settings import config
 
     backtest_mode = "--backtest" in sys.argv
+    local_backtest_mode = "--local-backtest" in sys.argv
+    save_data_mode = "--save-data" in sys.argv
+    optimize_mode = "--optimize" in sys.argv
+
+    if optimize_mode:
+        # Optimize parameters for a pair
+        import argparse
+        parser = argparse.ArgumentParser(description="Optimize backtest parameters for a pair")
+        parser.add_argument("--csv", required=True, help="Path to CSV file with candle data")
+        parser.add_argument("--pair", required=True, help="Trading pair (e.g., EURUSD)")
+        parser.add_argument("--digits", type=int, required=True, help="Number of decimal places")
+        parser.add_argument("--pip-value", type=float, required=True, help="Pip value")
+        parser.add_argument("--timeframe", default="M5", help="Timeframe (default: M5)")
+        parser.add_argument("--trail-pips", type=float, default=5.0, help="Trailing stop in pips")
+        parser.add_argument("--max-iterations", type=int, default=50, help="Max parameter combinations to test")
+        
+        args = parser.parse_args(sys.argv[2:])  # Skip script name and --optimize
+        
+        from app.backtest.parameter_optimizer import optimize_pair_parameters
+        
+        logging.info(
+            f"🔧 Optimizing parameters | pair: {args.pair} | CSV: {args.csv} | "
+            f"max iterations: {args.max_iterations}"
+        )
+        
+        await optimize_pair_parameters(
+            pair=args.pair,
+            csv_file=args.csv,
+            digits=args.digits,
+            pip_value=args.pip_value,
+            timeframe=args.timeframe,
+            trail_pips=args.trail_pips,
+            max_iterations=args.max_iterations,
+        )
+        return
+
+    if save_data_mode:
+        # Save live data from API to CSV files
+        import argparse
+        parser = argparse.ArgumentParser(description="Save live data from API to CSV")
+        parser.add_argument("--pair", required=True, help="Trading pair (e.g., EURUSD)")
+        parser.add_argument("--timeframe", default="M5", help="Timeframe (default: M5)")
+        parser.add_argument("--bars", type=int, default=1000, help="Number of bars to fetch (default: 1000)")
+        parser.add_argument("--output-dir", default="data", help="Output directory (default: data)")
+        
+        args = parser.parse_args(sys.argv[2:])  # Skip script name and --save-data
+        
+        client = CTraderClient()
+        await client.connect()
+        await client.authorize()
+        await client.init_symbols()
+        
+        info = client.get_pair_info(args.pair)
+        if not info:
+            logging.error(f"❌ Пара {args.pair} не найдена")
+            return
+        
+        symbol_id, _, digits, pip_value, _, _ = info
+        
+        from app.backtest.live_data_saver import save_live_data_from_api
+        
+        logging.info(
+            f"💾 Saving live data | pair: {args.pair} | timeframe: {args.timeframe} | "
+            f"bars: {args.bars} | output: {args.output_dir}"
+        )
+        
+        await save_live_data_from_api(
+            client=client,
+            pair=args.pair,
+            symbol_id=symbol_id,
+            timeframe=args.timeframe,
+            bars=args.bars,
+            output_dir=args.output_dir,
+        )
+        
+        client.api_metrics.log_summary()
+        return
+
+    if local_backtest_mode:
+        # Local backtest from CSV files
+        import argparse
+        parser = argparse.ArgumentParser(description="Run local backtest from CSV data")
+        parser.add_argument("--csv", required=True, help="Path to CSV file with candle data")
+        parser.add_argument("--pair", required=True, help="Trading pair (e.g., EURUSD)")
+        parser.add_argument("--digits", type=int, required=True, help="Number of decimal places")
+        parser.add_argument("--pip-value", type=float, required=True, help="Pip value")
+        parser.add_argument("--timeframe", default="M5", help="Timeframe (default: M5)")
+        parser.add_argument("--trail-pips", type=float, default=5.0, help="Trailing stop in pips")
+        
+        args = parser.parse_args(sys.argv[2:])  # Skip script name and --local-backtest
+        
+        from app.backtest.local_backtest import run_local_backtest_from_csv
+        
+        logging.info(
+            f"🧪 Local Backtest | pair: {args.pair} | CSV: {args.csv} | "
+            f"timeframe: {args.timeframe} | digits: {args.digits}"
+        )
+        
+        await run_local_backtest_from_csv(
+            csv_file=args.csv,
+            pair=args.pair,
+            digits=args.digits,
+            pip_value=args.pip_value,
+            timeframe=args.timeframe,
+            trail_pips=args.trail_pips,
+        )
+        return
 
     if backtest_mode:
         client = CTraderClient()
