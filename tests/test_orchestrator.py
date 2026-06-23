@@ -80,6 +80,28 @@ class TestOrchestratorWiring:
         assert strategy.pair_configs == mock_pair_configs
 
 
+class TestOrchestratorDualGrid:
+    def test_dual_grid_skips_breakout_strategy(self, mock_client, mock_market_cache, mock_pair_configs, monkeypatch):
+        from types import SimpleNamespace
+        from app.strategy.orchestrator import StrategyOrchestrator
+
+        monkeypatch.setattr(
+            "app.strategy.orchestrator.config",
+            SimpleNamespace(
+                STRATEGY_TYPE="DUAL_GRID_V8",
+                is_dual_grid_v8=lambda: True,
+                is_breakout_v3=lambda: False,
+            ),
+        )
+        orch = StrategyOrchestrator(
+            client=mock_client,
+            market_cache=mock_market_cache,
+            pair_configs=mock_pair_configs,
+        )
+        assert orch.get_active_strategy() is None
+        assert orch.get_strategy_type() == "DUAL_GRID_V8"
+
+
 class TestRecovery:
 
     async def test_reconcile_releases_when_limit_removed_at_broker(

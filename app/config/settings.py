@@ -286,6 +286,7 @@ class AppConfig:
     MAX_PORTFOLIO_DRAWDOWN: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN", "-0.10"))
     PORTFOLIO_TARGET: float = float(os.getenv("PORTFOLIO_TARGET", "0.15"))
     MAX_TOTAL_EXPOSURE: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "0.50"))
+    MAX_PAIR_EXPOSURE: float = float(os.getenv("MAX_PAIR_EXPOSURE", "0.30"))
     
     # Position sizing
     RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
@@ -385,6 +386,9 @@ class AppConfig:
 
     def is_breakout_v3(self) -> bool:
         return self.STRATEGY_TYPE.strip().upper() == "BREAKOUT_RETEST_V3"
+
+    def is_dual_grid_v8(self) -> bool:
+        return self.STRATEGY_TYPE.strip().upper() == "DUAL_GRID_V8"
 
 
 config = AppConfig()

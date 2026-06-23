@@ -20,6 +20,7 @@ class GridPosition:
     volume: float
     stop_loss: float
     client_order_id: str
+    pair: str = ""
     position_id: Optional[str] = None
     order_placed_at: datetime = field(default_factory=datetime.utcnow)
     position_opened_at: Optional[datetime] = None

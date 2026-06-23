@@ -7,7 +7,7 @@
 
 from dataclasses import dataclass
 
-# cTrader Open API: volume / lotSize в центах
+# cTrader Open API: volume / lotSize в центах (symbol.lotSize — размер 1 лота)
 VOLUME_CENTS_PER_LOT = 10_000_000
 # cTrader Open API: trendbar/spot цены в relative-формате, всегда / 100_000
 PRICE_SCALE = 100_000
@@ -20,13 +20,22 @@ def price_from_relative(relative: int, digits: int) -> float:
 PIP_LOT_UNITS = 100_000
 
 
-def relative_stop_loss_distance(entry: float, stop_loss: float) -> int:
-    """relativeStopLoss для ProtoOANewOrderReq (только SL на лимитке)."""
-    sl_dist = abs(entry - stop_loss)
-    rel_sl = int(round(sl_dist * PRICE_SCALE))
-    if rel_sl <= 0:
-        raise ValueError(f"invalid SL distance sl={sl_dist}")
-    return rel_sl
+def relative_stop_loss_distance(
+    entry: float,
+    stop_loss: float,
+    *,
+    digits: int = 5,
+) -> int:
+    """
+    relativeStopLoss для ProtoOANewOrderReq (только SL на лимитке).
+
+    cTrader требует: сначала округлить дистанцию в цене до symbol.digits,
+    затем умножить на PRICE_SCALE (см. Open API / forum «invalid precision»).
+    """
+    sl_dist = round(abs(float(entry) - float(stop_loss)), digits)
+    if sl_dist <= 0:
+        raise ValueError(f"invalid SL distance sl={sl_dist} digits={digits}")
+    return int(round(sl_dist * PRICE_SCALE))
 
 
 def partial_close_volume_cents(
@@ -57,28 +66,32 @@ def partial_close_volume_cents(
     return max(min_volume_cents, min(close_cents, total_cents - min_volume_cents))
 
 
-def relative_take_profit_distance(entry: float, take_profit: float) -> int:
+def relative_take_profit_distance(
+    entry: float,
+    take_profit: float,
+    *,
+    digits: int = 5,
+) -> int:
     """relativeTakeProfit для ProtoOANewOrderReq."""
-    tp_dist = abs(take_profit - entry)
-    rel_tp = int(round(tp_dist * PRICE_SCALE))
-    if rel_tp <= 0:
-        raise ValueError(f"invalid TP distance tp={tp_dist}")
-    return rel_tp
+    tp_dist = round(abs(float(take_profit) - float(entry)), digits)
+    if tp_dist <= 0:
+        raise ValueError(f"invalid TP distance tp={tp_dist} digits={digits}")
+    return int(round(tp_dist * PRICE_SCALE))
 
 
 def relative_sltp_distance(
     entry: float,
     stop_loss: float,
     take_profit: float,
+    *,
+    digits: int = 5,
 ) -> tuple[int, int]:
     """Для бэктеста / расчётов с TP."""
-    sl_dist = abs(entry - stop_loss)
-    tp_dist = abs(take_profit - entry)
-    rel_sl = int(round(sl_dist * PRICE_SCALE))
-    rel_tp = int(round(tp_dist * PRICE_SCALE))
-    if rel_sl <= 0 or rel_tp <= 0:
-        raise ValueError(f"invalid SL/TP distance sl={sl_dist} tp={tp_dist}")
-    return rel_sl, rel_tp
+    sl_dist = round(abs(float(entry) - float(stop_loss)), digits)
+    tp_dist = round(abs(float(take_profit) - float(entry)), digits)
+    if sl_dist <= 0 or tp_dist <= 0:
+        raise ValueError(f"invalid SL/TP distance sl={sl_dist} tp={tp_dist} digits={digits}")
+    return int(round(sl_dist * PRICE_SCALE)), int(round(tp_dist * PRICE_SCALE))
 
 
 def pip_value_from_symbol(
@@ -100,12 +113,23 @@ def pip_value_from_symbol(
     return 0.0001
 
 
-def lot_to_volume_cents(lot: float) -> int:
-    return int(round(lot * VOLUME_CENTS_PER_LOT))
+def lot_to_volume_cents(lot: float, lot_size_cents: int = VOLUME_CENTS_PER_LOT) -> int:
+    size = lot_size_cents if lot_size_cents > 0 else VOLUME_CENTS_PER_LOT
+    return int(round(lot * size))
 
 
-def volume_cents_to_lot(volume_cents: int) -> float:
-    return volume_cents / VOLUME_CENTS_PER_LOT
+def volume_cents_to_lot(
+    volume_cents: int,
+    lot_size_cents: int = VOLUME_CENTS_PER_LOT,
+) -> float:
+    size = lot_size_cents if lot_size_cents > 0 else VOLUME_CENTS_PER_LOT
+    return volume_cents / size
+
+
+def format_volume(volume_cents: int, lot_size_cents: int = VOLUME_CENTS_PER_LOT) -> str:
+    """Человекочитаемый объём: API cents + лоты по symbol.lotSize."""
+    lots = volume_cents_to_lot(volume_cents, lot_size_cents)
+    return f"{volume_cents} cents ({lots:.4f} lot)"
 
 
 def round_volume_to_step(volume_cents: int, step_volume_cents: int) -> int:
@@ -125,19 +149,23 @@ class ResolvedVolume:
     step_volume_cents: int
     bumped_to_min: bool
     rounded_to_step: bool
+    lot_size_cents: int = VOLUME_CENTS_PER_LOT
 
     @property
     def actual_lot(self) -> float:
-        return volume_cents_to_lot(self.actual_volume_cents)
+        return volume_cents_to_lot(self.actual_volume_cents, self.lot_size_cents)
 
 
 def resolve_order_volume(
     lot: float,
     min_volume_cents: int,
     step_volume_cents: int = 0,
+    *,
+    lot_size_cents: int = VOLUME_CENTS_PER_LOT,
 ) -> ResolvedVolume:
     """Рассчитанный объём с подъёмом до min и округлением по step (вверх)."""
-    calculated_cents = lot_to_volume_cents(lot)
+    size = lot_size_cents if lot_size_cents > 0 else VOLUME_CENTS_PER_LOT
+    calculated_cents = lot_to_volume_cents(lot, size)
     actual = calculated_cents
     bumped = False
     if min_volume_cents > 0 and actual < min_volume_cents:
@@ -156,4 +184,5 @@ def resolve_order_volume(
         step_volume_cents=step_volume_cents,
         bumped_to_min=bumped,
         rounded_to_step=rounded,
+        lot_size_cents=size,
     )

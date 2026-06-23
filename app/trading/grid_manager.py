@@ -36,7 +36,7 @@ class GridManager:
         self.positions.append(position)
         logger.info(
             f"Grid {self.direction.value}: Added position level {position.level_index}, "
-            f"entry={position.entry_price:.5f}, volume={position.volume:.2f}"
+            f"entry={position.entry_price:.5f}, volume={position.volume:.4f} lot",
         )
     
     def remove_position(self, position_id: str) -> Optional[GridPosition]:

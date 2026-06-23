@@ -345,7 +345,7 @@ class BreakoutScanner:
         bars_wait = signal_idx - setup.setup_start_bar
 
         if bars_wait > p["retest_timeout_bars"]:
-            logger.info(f"❌ [{symbol}] retest timeout")
+            logger.debug(f"❌ [{symbol}] retest timeout")
             return apply_transition(fsm, BreakoutState.INVALIDATED, clear_setup=True), True
 
         # ВСТАВИТЬ СУЩЕСТВУЮЩУЮ ЛОГИКУ V3 ЗДЕСЬ — shallow retest validation

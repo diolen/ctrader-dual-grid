@@ -22,6 +22,8 @@ from app.connection.api_metrics import ApiMetrics
 from app.trading.volume import (
     PRICE_SCALE,
     ResolvedVolume,
+    VOLUME_CENTS_PER_LOT,
+    format_volume,
     pip_value_from_symbol,
     price_from_relative,
     relative_stop_loss_distance,
@@ -68,8 +70,8 @@ def retry_on_ratelimit(max_retries: int = 3, base_delay: float = 1.0):
     return decorator
 
 
-# symbol_id, price_scale (100_000), digits, pip_value, min_volume_cents, step_volume_cents
-PairInfo = Tuple[int, int, int, float, int, int]
+# symbol_id, price_scale, digits, pip_value, min_volume_cents, step_volume_cents, lot_size_cents
+PairInfo = Tuple[int, int, int, float, int, int, int]
 
 # ── Правильные payloadType константы ────────────────────────────────────────
 _PT_APP_AUTH_REQ      = model_proto.PROTO_OA_APPLICATION_AUTH_REQ   # 2100
@@ -311,6 +313,7 @@ class CTraderClient:
                 price_scale = PRICE_SCALE
                 min_volume = int(sym.minVolume) if sym.minVolume > 0 else _FALLBACK_MIN_VOLUME_CENTS
                 step_volume = int(sym.stepVolume) if sym.stepVolume > 0 else 0
+                lot_size = int(sym.lotSize) if sym.lotSize > 0 else VOLUME_CENTS_PER_LOT
                 source = "API"
             elif pair in _FALLBACK_PIPS:
                 pip_value = _FALLBACK_PIPS[pair]
@@ -318,19 +321,21 @@ class CTraderClient:
                 price_scale = PRICE_SCALE
                 min_volume = _FALLBACK_MIN_VOLUME_CENTS
                 step_volume = 0
+                lot_size = VOLUME_CENTS_PER_LOT
                 source = "fallback"
             else:
                 logging.error(f"❌ Нет данных для {pair}")
                 continue
 
             self._pairs[pair] = (
-                symbol_id, price_scale, digits, pip_value, min_volume, step_volume,
+                symbol_id, price_scale, digits, pip_value, min_volume, step_volume, lot_size,
             )
             logging.info(
                 f"✅ {pair} | ID: {symbol_id} | {source} | "
                 f"Digits: {digits} | Pip: {pip_value:.5f} | "
-                f"MinVol: {min_volume} cents ({volume_cents_to_lot(min_volume):.2f} lot) | "
-                f"StepVol: {step_volume or '—'} cents"
+                f"MinVol: {format_volume(min_volume, lot_size)} | "
+                f"StepVol: {format_volume(step_volume, lot_size) if step_volume else '—'} | "
+                f"LotSize: {lot_size} cents"
             )
 
         if config.PAIRS:
@@ -365,6 +370,18 @@ class CTraderClient:
 
     def get_pair_info(self, pair: str) -> Optional[PairInfo]:
         return self._pairs.get(pair)
+
+    def _pair_digits(self, pair: str) -> int:
+        info = self.get_pair_info(pair) if pair else None
+        if info and len(info) > 2:
+            return int(info[2])
+        return 5
+
+    def _pair_lot_size_cents(self, pair: str) -> int:
+        info = self.get_pair_info(pair) if pair else None
+        if info and len(info) > 6:
+            return int(info[6]) or VOLUME_CENTS_PER_LOT
+        return VOLUME_CENTS_PER_LOT
 
     # ── Баланс счёта ─────────────────────────────────────────────
 
@@ -455,15 +472,19 @@ class CTraderClient:
         # Handle both string directions ("BUY"/"SELL") and Direction enum
         trade_side = model_proto.BUY if str(direction).upper() in ("BUY", "LONG") else model_proto.SELL
 
-        resolved = resolve_order_volume(lot, min_volume, step_volume)
+        resolved = resolve_order_volume(
+            lot, min_volume, step_volume, lot_size_cents=self._pair_lot_size_cents(pair),
+        )
         volume = resolved.actual_volume_cents
-        rel_sl = relative_stop_loss_distance(entry, stop_loss)
+        digits = self._pair_digits(pair)
+        entry = round(float(entry), digits)
+        stop_loss = round(float(stop_loss), digits)
+        rel_sl = relative_stop_loss_distance(entry, stop_loss, digits=digits)
 
         pair_tag = f"[{pair}] " if pair else ""
         logging.debug(
             f"📤 {pair_tag}place_limit_order: symbol_id={symbol_id} side={trade_side} | "
-            f"лот={resolved.calculated_lot:.2f}→{resolved.actual_lot:.2f} "
-            f"vol={volume} cents"
+            f"vol={format_volume(volume, resolved.lot_size_cents)}"
             + (f" | min↑{min_volume}" if resolved.bumped_to_min else "")
             + (f" | step={step_volume}" if resolved.rounded_to_step else "")
             + f" | entry={entry} sl={stop_loss} rel_sl={rel_sl}"
@@ -479,7 +500,7 @@ class CTraderClient:
             orderType           = model_proto.LIMIT,
             tradeSide           = trade_side,
             volume              = volume,
-            limitPrice          = float(entry),
+            limitPrice          = entry,
             relativeStopLoss    = rel_sl,
             clientOrderId       = client_order_id,
             timeInForce         = model_proto.GOOD_TILL_DATE,
@@ -534,19 +555,24 @@ class CTraderClient:
 
         trade_side = model_proto.BUY if str(direction).upper() in ("BUY", "LONG") else model_proto.SELL
 
-        resolved = resolve_order_volume(lot, min_volume, step_volume)
+        resolved = resolve_order_volume(
+            lot, min_volume, step_volume, lot_size_cents=self._pair_lot_size_cents(pair),
+        )
         volume = resolved.actual_volume_cents
-        rel_sl = relative_stop_loss_distance(entry, stop_loss)
+        digits = self._pair_digits(pair)
+        entry = round(float(entry), digits)
+        stop_loss = round(float(stop_loss), digits)
+        rel_sl = relative_stop_loss_distance(entry, stop_loss, digits=digits)
         rel_tp = None
         if take_profit is not None and take_profit > 0:
-            rel_tp = relative_take_profit_distance(entry, take_profit)
+            take_profit = round(float(take_profit), digits)
+            rel_tp = relative_take_profit_distance(entry, take_profit, digits=digits)
 
         pair_tag = f"[{pair}] " if pair else ""
         tp_dbg = f" rel_tp={take_profit}" if take_profit else ""
         logging.debug(
             f"📤 {pair_tag}place_stop_order: symbol_id={symbol_id} side={trade_side} | "
-            f"лот={resolved.calculated_lot:.2f}→{resolved.actual_lot:.2f} "
-            f"vol={volume} cents"
+            f"vol={format_volume(volume, resolved.lot_size_cents)}"
             + (f" | min↑{min_volume}" if resolved.bumped_to_min else "")
             + (f" | step={step_volume}" if resolved.rounded_to_step else "")
             + f" | stop={entry} sl={stop_loss} rel_sl={rel_sl}{tp_dbg}"
@@ -571,7 +597,7 @@ class CTraderClient:
             orderType           = model_proto.STOP,
             tradeSide           = trade_side,
             volume              = volume,
-            stopPrice           = float(entry),
+            stopPrice           = entry,
             relativeStopLoss    = rel_sl,
             clientOrderId       = client_order_id,
             timeInForce         = model_proto.GOOD_TILL_DATE,
@@ -725,6 +751,14 @@ class CTraderClient:
         symbol_id = getattr(trade_data, "symbolId", None) if trade_data else None
         open_ts = int(getattr(trade_data, "openTimestamp", 0) or 0) if trade_data else 0
         last_ts = int(getattr(ord, "utcLastUpdateTimestamp", 0) or 0)
+        trade_side = getattr(trade_data, "tradeSide", None) if trade_data else None
+        if trade_side == model_proto.BUY:
+            direction = "BUY"
+        elif trade_side == model_proto.SELL:
+            direction = "SELL"
+        else:
+            direction = ""
+        volume = int(getattr(trade_data, "volume", 0) or 0) if trade_data else 0
         return {
             "orderId": int(getattr(ord, "orderId", 0)),
             "clientOrderId": getattr(ord, "clientOrderId", "") or "",
@@ -733,7 +767,9 @@ class CTraderClient:
             "orderStatus": getattr(ord, "orderStatus", None),
             "open_timestamp_ms": open_ts,
             "last_update_ms": last_ts,
-            "limitPrice": getattr(ord, "limitPrice", 0.0),
+            "limitPrice": float(getattr(ord, "limitPrice", 0) or 0),
+            "direction": direction,
+            "volume": volume,
         }
 
     async def cancel_order(self, broker_order_id: int, timeout: float = 10.0) -> bool:
@@ -758,6 +794,12 @@ class CTraderClient:
             return False
         finally:
             self._cancel_futures.pop(int(broker_order_id), None)
+
+    def register_order_mapping(self, client_order_id: str, broker_order_id: int) -> None:
+        """Связать clientOrderId ↔ broker orderId (recovery)."""
+        bid = int(broker_order_id)
+        self._broker_order_ids[client_order_id] = bid
+        self._broker_to_client_order_id[bid] = client_order_id
 
     async def cancel_order_by_client_id(self, client_order_id: str, timeout: float = 10.0) -> bool:
         broker_id = self._broker_order_ids.get(client_order_id)
@@ -1187,7 +1229,7 @@ class CTraderClient:
                             balance = _money_to_float(int(res.trader.balance), self._money_digits)
                         else:
                             balance = 0.0
-                        logging.info(f"💰 Баланс счёта: {balance:.2f}")
+                        logging.debug(f"💰 Баланс счёта: {balance:.2f}")
                         if self._trader_future and not self._trader_future.done():
                             self._trader_future.set_result(balance)
                         
@@ -1517,7 +1559,7 @@ class CTraderClient:
                             None,
                         )
                         if pair and self._market_cache:
-                            _, _, digits, pip_value, _, _ = self._pairs[pair]
+                            _, _, digits, pip_value, _, _, _ = self._pairs[pair]
                             bid = (
                                 price_from_relative(res.bid, digits)
                                 if res.HasField("bid") and res.bid > 0

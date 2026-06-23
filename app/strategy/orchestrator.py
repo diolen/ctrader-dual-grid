@@ -1,7 +1,7 @@
 # app/strategy/orchestrator.py
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 from app.config.settings import config
 from app.strategy.base import BaseStrategy, MarketData
@@ -32,13 +32,22 @@ class StrategyOrchestrator:
         self._pair_configs = pair_configs
         self._trade_guard = TradeGuard()
         self._limit_orders_by_pair: Dict[str, dict] = {}
+        self._trading_engine: Any = None
 
-        self._strategy, self.STRATEGY_TYPE = create_breakout_strategy(self._trade_guard)
-        if hasattr(self._strategy, "pair_configs"):
-            self._strategy.pair_configs = self._pair_configs
-        self._strategy.set_fsm_timeout_handler(self._on_fsm_timeout)
-        ver = "v3" if config.is_breakout_v3() else "v2"
-        logging.info(f"✅ Strategy: {type(self._strategy).__name__} ({ver}) инициализирована")
+        if config.is_dual_grid_v8():
+            self._strategy = None
+            self.STRATEGY_TYPE = "DUAL_GRID_V8"
+            logging.info(
+                "✅ Orchestrator: order tracking для DUAL_GRID_V8 "
+                "(сигналы и сделки — TradingEngine)",
+            )
+        else:
+            self._strategy, self.STRATEGY_TYPE = create_breakout_strategy(self._trade_guard)
+            if hasattr(self._strategy, "pair_configs"):
+                self._strategy.pair_configs = self._pair_configs
+            self._strategy.set_fsm_timeout_handler(self._on_fsm_timeout)
+            ver = "v3" if config.is_breakout_v3() else "v2"
+            logging.info(f"✅ Strategy: {type(self._strategy).__name__} ({ver}) инициализирована")
         self._wire_execution_handlers()
 
     def get_active_strategy(self) -> BaseStrategy:
@@ -59,6 +68,8 @@ class StrategyOrchestrator:
 
     def cold_start_pair(self, pair: str, candles: list) -> None:
         """Холодный старт FSM после прогрева M5."""
+        if self._strategy is None:
+            return
         self._strategy.pair_config = self._pair_configs.get(pair)
         if hasattr(self._client, "get_pair_info"):
             info = self._client.get_pair_info(pair)
@@ -67,6 +78,8 @@ class StrategyOrchestrator:
         self._strategy.cold_start(candles, pair)
 
     async def update(self, market_data: MarketData) -> Optional[UnifiedSignal]:
+        if self._strategy is None:
+            return None
         pair = market_data.pair
         self._strategy.pair_config = self._pair_configs.get(pair)
         if hasattr(self._client, "get_pair_info"):
@@ -113,7 +126,7 @@ class StrategyOrchestrator:
     ) -> None:
         self._limit_orders_by_pair.pop(pair, None)
         await self.clear_pending(pair)
-        if hasattr(self._strategy, "release_signal_block"):
+        if self._strategy is not None and hasattr(self._strategy, "release_signal_block"):
             try:
                 await self._strategy.release_signal_block(pair)
             except Exception as e:
@@ -159,6 +172,10 @@ class StrategyOrchestrator:
             await self.release_limit_order(pair, client_order_id)
         return ok
 
+    def set_trading_engine(self, engine: Any) -> None:
+        """Dual Grid: связать TradingEngine для fill/recovery callbacks."""
+        self._trading_engine = engine
+
     async def on_execution_event(
         self,
         exec_type,
@@ -183,10 +200,13 @@ class StrategyOrchestrator:
 
         if exec_type == model_proto.ORDER_FILLED:
             self._limit_orders_by_pair.pop(pair, None)
-            if hasattr(self._strategy, "on_order_filled"):
+            if self._strategy is not None and hasattr(self._strategy, "on_order_filled"):
                 self._strategy.on_order_filled(pair)
             if client_order_id:
                 await self.mark_order_complete(client_order_id, pair)
+            engine = self._trading_engine
+            if engine is not None and position_id and hasattr(engine, "on_order_filled"):
+                engine.on_order_filled(client_order_id, str(position_id), pair)
         elif exec_type in (
             model_proto.ORDER_CANCELLED,
             model_proto.ORDER_EXPIRED,
@@ -257,7 +277,7 @@ class StrategyOrchestrator:
 
             if pair in position_pairs:
                 self._limit_orders_by_pair.pop(pair, None)
-                if hasattr(self._strategy, "on_order_filled"):
+                if self._strategy is not None and hasattr(self._strategy, "on_order_filled"):
                     self._strategy.on_order_filled(pair)
                 if cid:
                     await self.mark_order_complete(cid, pair)

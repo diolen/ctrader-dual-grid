@@ -87,6 +87,9 @@ orchestrator, client, market_cache)` для каждой пары.
 `TradingEngine` хранит собственное состояние сверх того, что предоставляют
 Broker/Scanner Layer:
 
+- `grids: GridBook` — per-pair Dual Grid: для каждого символа из `watched_instruments`
+  отдельные `long_grid` + `short_grid` (`PairGrids`). Дисбаланс и лимит экспозиции
+  считаются **внутри пары**; глобальный TP/SL и `MAX_TOTAL_EXPOSURE` — на весь счёт.
 - `watched_instruments: list[(symbol, timeframe)]` — список наблюдаемых пар и
   таймфреймов, задаётся в конфигурации при инициализации. Broker/Scanner Layer
   не сообщают, что сканировать — это явно знает только Trading Layer.
@@ -429,33 +432,45 @@ ATR): объём умножается на `EXECUTION_WARN_VOLUME_REDUCTION`, о
 
 #### Контроль суммарной экспозиции
 
+**Per-pair** (`MAX_PAIR_EXPOSURE`):
 ```
-total_exposure_lots = long_grid.total_exposure_lots() + short_grid.total_exposure_lots()
+pair_exposure_lots = pair_grids.long_grid.total_exposure_lots() + pair_grids.short_grid.total_exposure_lots()
 ```
-Сравнивается с лимитом, производным от `MAX_TOTAL_EXPOSURE` и текущего equity.
-`MAX_TOTAL_EXPOSURE` (float, доля 0.0-1.0) реализуется через оценку маржи через
+Сравнивается с `equity * MAX_PAIR_EXPOSURE / margin_per_lot` для символа.
+
+**Global** (`MAX_TOTAL_EXPOSURE`):
+```
+total_margin = sum(pair_exposure_lots * margin_per_lot for each pair in GridBook)
+```
+Сравнивается с `equity * MAX_TOTAL_EXPOSURE`.
+
+`MAX_TOTAL_EXPOSURE` и `MAX_PAIR_EXPOSURE` (float, доля 0.0-1.0) реализуются через оценку маржи через
 `ProtoOAExpectedMarginReq`: для гипотетического объёма 1 лота запрашивается оценка
-маржи у брокера, затем лимит рассчитывается как `equity * MAX_TOTAL_EXPOSURE / margin_per_lot`.
+маржи у брокера, затем лимит рассчитывается как `equity * EXPOSURE_FRACTION / margin_per_lot`.
 Это корректно учитывает динамическое плечо, тип расчёта маржи (MAX/SUM/NET) и
 валютные конвертации, которые реализованы на стороне брокера.
 
-`can_expand(direction: Direction) -> bool` возвращает `False`, если:
-- `total_exposure_lots` после гипотетического добавления стандартного шага
-  объёма превысила бы лимит от `MAX_TOTAL_EXPOSURE`; **или**
-- сработал жёсткий порог дисбаланса (`IMBALANCE_HARD_THRESHOLD`) именно для
-  запрошенной стороны (см. ниже).
+`can_expand(pair, direction, pair_grids, grid_book, ...) -> bool` возвращает `False`, если:
+- превышен per-pair лимит `MAX_PAIR_EXPOSURE`; **или**
+- превышен глобальный лимит `MAX_TOTAL_EXPOSURE`; **или**
+- сработал жёсткий порог дисбаланса (`IMBALANCE_HARD_THRESHOLD`) **внутри этой пары**
+  для запрошенной стороны (см. ниже).
 
-#### Дисбаланс-контроль
+#### Дисбаланс-контроль (per-pair)
 
 ```
-total_volume = long_grid.total_exposure_lots() + short_grid.total_exposure_lots()
-imbalance = abs(long_volume - short_volume) / total_volume   # 0, если total_volume == 0
+pair_long  = pair_grids.long_grid.total_exposure_lots()
+pair_short = pair_grids.short_grid.total_exposure_lots()
+pair_total = pair_long + pair_short
+imbalance = abs(pair_long - pair_short) / pair_total   # 0, если pair_total == 0
 ```
 - Мягкий порог `IMBALANCE_SOFT_THRESHOLD`: `ADD_LEVEL_THRESHOLD` для перевешенной
-  стороны повышается на `IMBALANCE_SCORE_PENALTY`.
+  стороны **этой пары** повышается на `IMBALANCE_SCORE_PENALTY`.
 - Жёсткий порог `IMBALANCE_HARD_THRESHOLD` (> мягкого): расширение перевешенной
-  стороны полностью блокируется через `can_expand()`, до снижения дисбаланса
+  стороны **этой пары** полностью блокируется через `can_expand()`, до снижения дисбаланса
   ниже мягкого порога.
+- Дисбаланс на одной паре **не блокирует** вход на другой (например, XAUUSD LONG
+  не мешает BTCUSD LONG).
 
 #### База для PnL портфеля
 
@@ -661,12 +676,11 @@ WATCHED_INSTRUMENTS   # список (symbol, timeframe)
   Freeze над Conservative;
 - Exit-режим: закрытие позиции с минимальным `profit` через `get_positions(force=True)`,
   включая крайний случай, когда все позиции прибыльны;
-- дисбаланс-контроль: `can_expand(direction)` различается для LONG/SHORT при
-  дисбалансе, мягкий и жёсткий пороги отдельно;
-- `MAX_TOTAL_EXPOSURE`: `can_expand()` возвращает `False` при превышении лимита
-  суммарной экспозиции, независимо от дисбаланса. **Примечание:** этот тест пишется
-  на заглушке `REFERENCE_LOT_VALUE` и подлежит пересмотру после реализации
-  `get_expected_margin()` в `ctrader_client.py`;
+- дисбаланс-контроль **per-pair**: `can_expand(pair, direction)` различается для LONG/SHORT при
+  дисбалансе внутри пары, мягкий и жёсткий пороги отдельно; дисбаланс на паре A
+  не блокирует expand на паре B;
+- `MAX_PAIR_EXPOSURE` и `MAX_TOTAL_EXPOSURE`: `can_expand()` возвращает `False` при
+  превышении per-pair или глобального лимита;
 - execution-проверка: спред/ATR-spike отдельно, warn-зона снижает объём;
 - холодный старт: execution-проверка не блокирует при незаполненном окне истории;
 - `consecutive_execution_rejections` инкремент/сброс;

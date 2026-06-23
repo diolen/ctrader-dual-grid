@@ -309,6 +309,7 @@ MAX_GRID_LEVELS=5
 MAX_PORTFOLIO_DRAWDOWN=-0.10
 PORTFOLIO_TARGET=0.15
 MAX_TOTAL_EXPOSURE=0.50
+MAX_PAIR_EXPOSURE=0.30
 
 # Размер позиции
 RISK_PER_TRADE=0.02
@@ -347,11 +348,17 @@ WATCHED_INSTRUMENTS=EURUSD:M5
 ```
 app/trading/
   grid_models.py          # GridPosition, Direction, ExecutionApproval
-  grid_manager.py         # GridManager для Long/Short сеток
+  grid_manager.py         # GridManager для Long/Short сеток одной пары
+  grid_book.py            # GridBook — per-pair long + short grids
   portfolio_manager.py    # PortfolioManager для рисков и деградации
   atr_calculator.py       # Расчёт ATR методом Уайлдера
   trading_engine.py       # TradingEngine - основной оркестратор
 ```
+
+**Multi-pair:** каждая пара из `WATCHED_INSTRUMENTS` получает собственную Dual Grid
+(long + short). Дисбаланс и `MAX_PAIR_EXPOSURE` — per-pair; глобальный TP/SL и
+`MAX_TOTAL_EXPOSURE` — на весь счёт. Глобальное закрытие (TP/SL/Exit) закрывает
+позиции **всех** watched-пар.
 
 Trading Layer интегрируется с существующим `StrategyOrchestrator` для отслеживания ордеров и recovery логики, но использует собственный `SetupScannerEngine` для получения сигналов.
 

@@ -303,6 +303,80 @@ class _PairRuntime:
 
 
 
+def _log_dual_grid_startup(polled_pairs: list[str]) -> None:
+    """Лог конфигурации Dual Grid: что опрашивается vs что реально торгуется."""
+    from app.config.settings import config
+
+    watched = config.WATCHED_INSTRUMENTS
+    watched_fmt = ", ".join(f"{s}:{tf}" for s, tf in watched) or "(пусто)"
+    logging.info(f"📋 Dual Grid WATCHED_INSTRUMENTS: {watched_fmt}")
+
+    watched_symbols = {s for s, _ in watched}
+    polled_set = set(polled_pairs)
+
+    not_traded = polled_set - watched_symbols
+    if not_traded:
+        logging.warning(
+            "⚠️ Dual Grid: PAIRS опрашиваются, но TradingEngine не торгует "
+            f"(нет в WATCHED_INSTRUMENTS): {', '.join(sorted(not_traded))}",
+        )
+
+    not_polled = watched_symbols - polled_set
+    if not_polled:
+        logging.warning(
+            "⚠️ Dual Grid: в WATCHED_INSTRUMENTS, но не в PAIRS — не опрашиваются: "
+            f"{', '.join(sorted(not_polled))}",
+        )
+
+    active = sorted(polled_set & watched_symbols)
+    if active:
+        logging.info(f"✅ Dual Grid торгуемые пары: {', '.join(active)}")
+    elif watched_symbols:
+        logging.warning("⚠️ Dual Grid: нет пересечения PAIRS и WATCHED_INSTRUMENTS — сделок не будет")
+
+
+async def _warmup_pair_dual_grid(
+    client: CTraderClient,
+    pair: str,
+    trading_engine: Optional["TradingEngine"] = None,
+) -> Optional[_PairRuntime]:
+    """Прогрев M5 для Dual Grid — только свечи + FSM сканеров, без Breakout orchestrator."""
+    from app.config.settings import config
+
+    info = client.get_pair_info(pair)
+    if not info:
+        logging.error(f"❌ Пара {pair} не инициализирована, пропускаем")
+        return None
+
+    symbol_id = info[0]
+    pair_cfg = config.get_pair_config(pair)
+    entry_tf = pair_cfg.entry_timeframe
+    entry_period = TIMEFRAME_MAP.get(entry_tf, model_proto.M5)
+    entry_minutes = TIMEFRAME_MINUTES.get(entry_tf, 5)
+
+    warmup_bars = config.warmup_bars_for_pair(pair)
+    candles = await _fetch_warmup_candles(
+        client, pair, symbol_id, entry_tf, entry_period, entry_minutes, warmup_bars,
+    )
+
+    if trading_engine is not None:
+        screener = trading_engine._ensure_screener()
+        screener.set_pip_value(pair, float(info[3]))
+        screener.warmup_pair(pair, candles, entry_tf)
+
+    logging.info(
+        f"🚀 [{pair}] Dual Grid: прогрето {len(candles)} свечей {entry_tf}",
+    )
+    return _PairRuntime(
+        pair=pair,
+        symbol_id=symbol_id,
+        candles=candles,
+        entry_tf=entry_tf,
+        entry_period=entry_period,
+        entry_minutes=entry_minutes,
+    )
+
+
 async def _warmup_pair(
     client: CTraderClient,
     pair: str,
@@ -460,7 +534,8 @@ async def _poll_pair(
     entry_minutes = state.entry_minutes
     strategy = orchestrator.get_active_strategy()
     force_tick = (
-        hasattr(strategy, "needs_update_without_new_bar")
+        strategy is not None
+        and hasattr(strategy, "needs_update_without_new_bar")
         and strategy.needs_update_without_new_bar(pair)
     )
 
@@ -491,7 +566,7 @@ async def _poll_pair(
         suffix = " (догон)" if bars_added > 1 else ""
         logging.info(f"📊 [{pair}] {entry_tf} +{bars_added}{suffix}")
         _sync_warmup_cache(pair, state.candles)
-    elif force_tick:
+    elif force_tick and strategy is not None:
         status = (
             strategy.pair_status_line(pair, bars_count=len(state.candles))
             if hasattr(strategy, "pair_status_line")
@@ -512,14 +587,14 @@ async def _poll_pair(
     state.debug_counter += 1
     debug_interval = _debug_stats_interval(entry_minutes)
     if debug_interval > 0 and state.debug_counter % debug_interval == 0:
-        if hasattr(strategy, "print_debug"):
+        if strategy is not None and hasattr(strategy, "print_debug"):
             logging.info(f"🔍 [{pair}] Debug статистика (итерация {state.debug_counter}):")
             strategy.print_debug()
 
 
 def _log_pair_fsm(states: list[_PairRuntime], orchestrator: StrategyOrchestrator) -> None:
     strategy = orchestrator.get_active_strategy()
-    if not hasattr(strategy, "pair_status_line"):
+    if strategy is None or not hasattr(strategy, "pair_status_line"):
         return
     parts = [
         f"{s.pair}={strategy.pair_status_line(s.pair, bars_count=len(s.candles))}"
@@ -572,19 +647,28 @@ async def _run_bar_coordinator(
     
     # Initialize TradingEngine if DUAL_GRID_V8 strategy
     trading_engine: Optional[TradingEngine] = None
-    if config.STRATEGY_TYPE == "DUAL_GRID_V8":
+    dual_grid = config.STRATEGY_TYPE == "DUAL_GRID_V8"
+    if dual_grid:
         trading_engine = TradingEngine()
         logging.info("🚀 TradingEngine initialized for DUAL_GRID_V8 strategy")
-    
+        _log_dual_grid_startup(pairs)
+        orchestrator.set_trading_engine(trading_engine)
+
     states: list[_PairRuntime] = []
     for pair in pairs:
-        state = await _warmup_pair(client, pair, orchestrator)
+        if dual_grid:
+            state = await _warmup_pair_dual_grid(client, pair, trading_engine)
+        else:
+            state = await _warmup_pair(client, pair, orchestrator)
         if state:
             states.append(state)
 
     if not states:
         logging.error("❌ Нет пар для торговли после прогрева")
         return
+
+    if trading_engine is not None:
+        await trading_engine.bootstrap_from_broker(client, orchestrator)
 
     poll_minutes = min(s.entry_minutes for s in states)
     entry_tfs = ", ".join(f"{s.pair}:{s.entry_tf}" for s in states)
@@ -1270,7 +1354,8 @@ async def main():
         return
 
     logging.info(
-        f"📊 Торгуем по парам: {', '.join(config.PAIRS)} | режим: {config.TRADING_MODE}"
+        f"📊 Торгуем по парам: {', '.join(config.PAIRS)} | "
+        f"стратегия: {config.STRATEGY_TYPE} | режим: {config.TRADING_MODE}",
     )
     await _run_live_loop(config)
 

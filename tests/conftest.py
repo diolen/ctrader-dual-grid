@@ -68,9 +68,18 @@ def mock_pair_configs():
 
 
 @pytest.fixture
-def orchestrator(mock_client, mock_market_cache, mock_pair_configs):
+def orchestrator(mock_client, mock_market_cache, mock_pair_configs, monkeypatch):
+    from types import SimpleNamespace
     from app.strategy.orchestrator import StrategyOrchestrator
 
+    monkeypatch.setattr(
+        "app.strategy.orchestrator.config",
+        SimpleNamespace(
+            STRATEGY_TYPE="BREAKOUT_RETEST_V3",
+            is_dual_grid_v8=lambda: False,
+            is_breakout_v3=lambda: True,
+        ),
+    )
     return StrategyOrchestrator(
         client=mock_client,
         market_cache=mock_market_cache,
